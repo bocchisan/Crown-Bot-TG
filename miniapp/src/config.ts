@@ -29,8 +29,11 @@ export interface PageParams {
 export function parseFragment(hash: string): PageParams | null {
   const match = /^#([a-z]+)=(.+)$/.exec(hash);
   if (!match || !match[1] || !match[2]) return null;
+  // base64url → base64: swap the alphabet AND restore the padding atob demands.
+  const b64 = match[2].replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
   const json = new TextDecoder().decode(
-    Uint8Array.from(atob(match[2].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)),
+    Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)),
   );
   return { action: match[1], payload: JSON.parse(json) as Record<string, string> };
 }
