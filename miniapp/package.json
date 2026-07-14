@@ -4,6 +4,19 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "@crown/core": "*"
+    "@crown/core": "*",
+    "@dfinity/agent": "^3.4.3",
+    "@dfinity/principal": "^3.4.3",
+    "@solana/web3.js": "^1.98.4",
+    "@wallet-standard/app": "^1.1.0",
+    "@wallet-standard/base": "^1.1.0",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "vite": "^8.1.4"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite"
   }
 }
