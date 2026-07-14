@@ -12,6 +12,8 @@ import { cancelFlow, collectFlow, linkFlow, subscribeFlow, type WalletSigner } f
 import { discoverWallets } from "./wallet.ts";
 
 interface TelegramWebApp {
+  /** Empty string outside a real Telegram webview — the only honest signal. */
+  initData: string;
   ready(): void;
   sendData(data: string): void;
   close(): void;
@@ -78,11 +80,14 @@ async function main(): Promise<void> {
       await withWallet(async (wallet) => {
         const result = await linkFlow(challenge, wallet);
         const telegram = window.Telegram?.WebApp;
-        if (telegram) {
+        // The telegram script defines WebApp even in a plain browser; only a
+        // non-empty initData means a real webview where sendData can deliver.
+        if (telegram && telegram.initData) {
           telegram.sendData(JSON.stringify(result));
           telegram.close();
         } else {
-          say(`Результат (вне Telegram): ${JSON.stringify(result)}`);
+          say("Пришлите боту сообщением:");
+          say(JSON.stringify(result));
         }
       });
       break;
