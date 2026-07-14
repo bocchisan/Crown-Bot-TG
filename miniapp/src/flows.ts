@@ -52,14 +52,34 @@ function nowSeconds(): bigint {
 
 type Blockhash = Awaited<ReturnType<Connection["getLatestBlockhash"]>>;
 
+/**
+ * Public RPC nodes throttle bursts and answer with a plain network error.
+ * Retry with a backoff instead of failing the whole flow — this is the
+ * untrusted zone, a stumbling provider is normal.
+ */
+async function withRetry<T>(what: string, call: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+    }
+  }
+  throw new Error(`${what}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
 async function sendSigned(
   context: FlowContext,
   wire: Uint8Array,
   latest?: Blockhash,
 ): Promise<string> {
-  const signature = await context.connection.sendRawTransaction(wire);
+  const signature = await withRetry("send", () => context.connection.sendRawTransaction(wire));
   const anchor = latest ?? (await context.connection.getLatestBlockhash());
-  await context.connection.confirmTransaction({ signature, ...anchor });
+  await withRetry("confirm", () =>
+    context.connection.confirmTransaction({ signature, ...anchor }),
+  );
   return signature;
 }
 
@@ -146,13 +166,15 @@ export async function subscribeFlow(
       nonce: t0,
     };
     const { instruction, escrow } = createEscrowIx(birth, context.addresses);
-    const existing = await context.connection.getAccountInfo(escrow);
+    const existing = await withRetry("read escrow", () =>
+      context.connection.getAccountInfo(escrow),
+    );
     if (existing !== null) {
       if (attempt >= 3) throw new Error("escrow address keeps colliding");
       t0 += 1n;
       continue;
     }
-    const latest = await context.connection.getLatestBlockhash();
+    const latest = await withRetry("blockhash", () => context.connection.getLatestBlockhash());
     const transaction = prepared(wallet.publicKey, latest).add(instruction);
     const [wire] = await wallet.signTransactions([transaction]);
     if (!wire) throw new Error("wallet returned no transaction");
@@ -166,6 +188,8 @@ export async function subscribeFlow(
 export interface DueChunk {
   escrow: PublicKey;
   index: number;
+  /** The account as `getProgramAccounts` already returned it — never refetched. */
+  account: EscrowAccount;
 }
 
 /** Every due, unreleased chunk of every live escrow of the channel. */
@@ -174,17 +198,19 @@ export async function findDueChunks(
   context: FlowContext,
 ): Promise<DueChunk[]> {
   const now = nowSeconds();
-  const found = await findEscrows(
-    context.connection,
-    context.addresses.factory,
-    escrowFilters({ resolver: channel.resolver }),
+  const found = await withRetry("discover escrows", () =>
+    findEscrows(
+      context.connection,
+      context.addresses.factory,
+      escrowFilters({ resolver: channel.resolver }),
+    ),
   );
   const due: DueChunk[] = [];
   for (const { address, escrow } of found) {
     if (escrow.settled) continue;
     for (let index = escrow.released; index < escrow.nChunks; index++) {
       if (escrow.t0 + BigInt(index) * escrow.period > now) break;
-      due.push({ escrow: address, index });
+      due.push({ escrow: address, index, account: escrow });
     }
   }
   return due;
@@ -203,11 +229,14 @@ export async function collectFlow(
 ): Promise<{ released: DueChunk[]; signatures: string[] }> {
   const due = await findDueChunks(channel, context);
   const transactions: Transaction[] = [];
-  const latest = due.length > 0 ? await context.connection.getLatestBlockhash() : null;
+  const latest =
+    due.length > 0
+      ? await withRetry("blockhash", () => context.connection.getLatestBlockhash())
+      : null;
   for (const chunk of due) {
-    const account = await context.connection.getAccountInfo(chunk.escrow);
-    if (!account) continue;
-    const escrow = decodeEscrow(new Uint8Array(account.data));
+    // The account came with the discovery call; refetching it per chunk is
+    // exactly what makes a public RPC start refusing the burst.
+    const escrow = chunk.account;
     const signed = await context.subscription.request_release({
       chain: context.chainId,
       subscriptionId: channelId,
@@ -265,7 +294,9 @@ export async function cancelFlow(
   wallet: WalletSigner,
   context: FlowContext,
 ): Promise<{ signature: string }> {
-  const account = await context.connection.getAccountInfo(escrowAddress);
+  const account = await withRetry("read escrow", () =>
+    context.connection.getAccountInfo(escrowAddress),
+  );
   if (!account) throw new Error("escrow account not found");
   const escrow = decodeEscrow(new Uint8Array(account.data));
 
@@ -285,7 +316,7 @@ export async function cancelFlow(
   if ("Err" in signed) throw new Error(`request_cancel: ${signed.Err}`);
 
   const message = cancelMessage(context.domain, context.addresses.factory, escrowAddress);
-  const latest = await context.connection.getLatestBlockhash();
+  const latest = await withRetry("blockhash", () => context.connection.getLatestBlockhash());
   const transaction = prepared(wallet.publicKey, latest)
     .add(ed25519VerifyIx(escrow.resolver, signed.Ok.signature, message))
     .add(cancelIx(escrowAddress, escrow, context.addresses));
