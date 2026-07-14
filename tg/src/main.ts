@@ -128,11 +128,14 @@ async function main(): Promise<void> {
       threshold: threshold ?? 0n,
     });
     const challenge = service.issueSetupChallenge(BigInt(ctx.from.id), tgChatId);
-    await ctx.reply("Подпишите кошельком владельца — он станет получателем подписок:", {
-      reply_markup: new Keyboard()
-        .webApp("Подписать", webAppUrl(miniappUrl, "link", { challenge }))
-        .oneTime(),
-    });
+    const url = webAppUrl(miniappUrl, "link", { challenge });
+    await ctx.reply(
+      "Подпишите кошельком владельца — он станет получателем подписок.\n" +
+        `Если кошелёк в обычном браузере: откройте ссылку, подпишите и пришлите мне JSON со страницы.\n${url}`,
+      {
+        reply_markup: new Keyboard().webApp("Подписать", url).oneTime(),
+      },
+    );
   });
 
   bot.command("start", async (ctx) => {
@@ -148,46 +151,49 @@ async function main(): Promise<void> {
       return;
     }
     const challenge = service.issueChallenge(BigInt(ctx.from.id), channel.channelId);
-    const card =
+    const linkUrl = webAppUrl(miniappUrl, "link", { challenge });
+    let card =
       `Приватный канал.\n` +
       (channel.threshold > 0n ? `Вход навсегда: репутация ≥ ${channel.threshold}.\n` : "") +
       (channel.price > 0n
         ? `Подписка: ${channel.price} minor USDC за ${channel.period} сек.\n`
         : "") +
-      `Сначала привяжите кошелёк, затем подайте заявку на вступление.`;
-    const keyboard = new Keyboard().webApp(
-      "Привязать кошелёк",
-      webAppUrl(miniappUrl, "link", { challenge }),
-    );
+      `Сначала привяжите кошелёк, затем подайте заявку на вступление.\n\n` +
+      `Привязка в браузере (подпишите и пришлите мне JSON со страницы):\n${linkUrl}`;
+    const keyboard = new Keyboard().webApp("Привязать кошелёк", linkUrl);
     if (channel.price > 0n) {
-      keyboard.row().webApp(
-        "Подписаться",
-        webAppUrl(miniappUrl, "subscribe", {
-          channelId: hex(channel.channelId),
-          resolver: hex(channel.resolver),
-          owner: new PublicKey(channel.ownerWallet).toBase58(),
-          price: channel.price.toString(),
-          period: channel.period.toString(),
-          subscription: subscriptionCanisterId,
-          icHost,
-        }),
-      );
+      const subscribeUrl = webAppUrl(miniappUrl, "subscribe", {
+        channelId: hex(channel.channelId),
+        resolver: hex(channel.resolver),
+        owner: new PublicKey(channel.ownerWallet).toBase58(),
+        price: channel.price.toString(),
+        period: channel.period.toString(),
+        subscription: subscriptionCanisterId,
+        icHost,
+      });
+      keyboard.row().webApp("Подписаться", subscribeUrl);
+      card += `\n\nПодписка в браузере:\n${subscribeUrl}`;
     }
     await ctx.reply(card, { reply_markup: keyboard.oneTime() });
   });
 
-  bot.on("message:web_app_data", async (ctx) => {
-    if (!ctx.from) return;
-    const raw = ctx.message.web_app_data.data;
+  // One handler for both transports of the link result: web_app sendData
+  // (inside Telegram's webview) and a plain text message with the same JSON
+  // — for wallets living in a regular browser, where sendData cannot reach.
+  async function handleLinkResult(
+    ctx: { reply(text: string): Promise<unknown> },
+    fromId: number,
+    raw: string,
+  ): Promise<void> {
     try {
       const data = JSON.parse(raw) as { wallet: string; signature: string; nonce: string };
       const wallet = new PublicKey(data.wallet).toBytes();
       const signature = new Uint8Array(Buffer.from(data.signature, "base64"));
-      const telegramId = BigInt(ctx.from.id);
+      const telegramId = BigInt(fromId);
 
-      const setup = pendingPolicies.get(ctx.from.id);
+      const setup = pendingPolicies.get(fromId);
       if (setup) {
-        pendingPolicies.delete(ctx.from.id);
+        pendingPolicies.delete(fromId);
         const { deepLink } = await service.completeSetup({
           telegramId,
           tgChatId: setup.tgChatId,
@@ -216,6 +222,18 @@ async function main(): Promise<void> {
     } catch (error) {
       await ctx.reply(`Не получилось: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  bot.on("message:web_app_data", async (ctx) => {
+    if (!ctx.from) return;
+    await handleLinkResult(ctx, ctx.from.id, ctx.message.web_app_data.data);
+  });
+
+  bot.on("message:text", async (ctx) => {
+    if (ctx.chat.type !== "private" || !ctx.from) return;
+    const text = ctx.message.text.trim();
+    if (!text.startsWith("{")) return; // commands and chatter are not ours
+    await handleLinkResult(ctx, ctx.from.id, text);
   });
 
   // The owner's collect button: the page finds due chunks and batches
@@ -228,23 +246,23 @@ async function main(): Promise<void> {
       return;
     }
     const keyboard = new Keyboard();
+    const urls: string[] = [];
     for (const channel of owned) {
-      keyboard
-        .webApp(
-          `Собрать: канал ${hex(channel.channelId).slice(0, 8)}…`,
-          webAppUrl(miniappUrl, "collect", {
-            channelId: hex(channel.channelId),
-            resolver: hex(channel.resolver),
-            owner: new PublicKey(channel.ownerWallet).toBase58(),
-            price: channel.price.toString(),
-            period: channel.period.toString(),
-            subscription: subscriptionCanisterId,
-            icHost,
-          }),
-        )
-        .row();
+      const url = webAppUrl(miniappUrl, "collect", {
+        channelId: hex(channel.channelId),
+        resolver: hex(channel.resolver),
+        owner: new PublicKey(channel.ownerWallet).toBase58(),
+        price: channel.price.toString(),
+        period: channel.period.toString(),
+        subscription: subscriptionCanisterId,
+        icHost,
+      });
+      keyboard.webApp(`Собрать: канал ${hex(channel.channelId).slice(0, 8)}…`, url).row();
+      urls.push(url);
     }
-    await ctx.reply("Сбор созревших кусков:", { reply_markup: keyboard.oneTime() });
+    await ctx.reply(`Сбор созревших кусков. В браузере:\n${urls.join("\n")}`, {
+      reply_markup: keyboard.oneTime(),
+    });
   });
 
   // The donor's exit: the page finds his live escrow of the channel and
@@ -257,20 +275,18 @@ async function main(): Promise<void> {
       return;
     }
     const keyboard = new Keyboard();
+    const urls: string[] = [];
     for (const channel of linked) {
-      keyboard
-        .webApp(
-          `Отменить подписку: канал ${hex(channel.channelId).slice(0, 8)}…`,
-          webAppUrl(miniappUrl, "cancel", {
-            channelId: hex(channel.channelId),
-            resolver: hex(channel.resolver),
-            subscription: subscriptionCanisterId,
-            icHost,
-          }),
-        )
-        .row();
+      const url = webAppUrl(miniappUrl, "cancel", {
+        channelId: hex(channel.channelId),
+        resolver: hex(channel.resolver),
+        subscription: subscriptionCanisterId,
+        icHost,
+      });
+      keyboard.webApp(`Отменить подписку: канал ${hex(channel.channelId).slice(0, 8)}…`, url).row();
+      urls.push(url);
     }
-    await ctx.reply("Отмена подписки (остаток вернётся мгновенно):", {
+    await ctx.reply(`Отмена подписки (остаток вернётся мгновенно). В браузере:\n${urls.join("\n")}`, {
       reply_markup: keyboard.oneTime(),
     });
   });
