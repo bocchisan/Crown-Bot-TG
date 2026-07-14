@@ -50,18 +50,24 @@ function nowSeconds(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
 }
 
-async function sendSigned(context: FlowContext, wire: Uint8Array): Promise<string> {
+type Blockhash = Awaited<ReturnType<Connection["getLatestBlockhash"]>>;
+
+async function sendSigned(
+  context: FlowContext,
+  wire: Uint8Array,
+  latest?: Blockhash,
+): Promise<string> {
   const signature = await context.connection.sendRawTransaction(wire);
-  const latest = await context.connection.getLatestBlockhash();
-  await context.connection.confirmTransaction({ signature, ...latest });
+  const anchor = latest ?? (await context.connection.getLatestBlockhash());
+  await context.connection.confirmTransaction({ signature, ...anchor });
   return signature;
 }
 
-async function prepared(context: FlowContext, payer: Uint8Array): Promise<Transaction> {
+/** One blockhash serves a whole batch: the public RPC rate-limits bursts. */
+function prepared(payer: Uint8Array, latest: Blockhash): Transaction {
   const transaction = new Transaction();
   transaction.feePayer = new PublicKey(payer);
-  const { blockhash } = await context.connection.getLatestBlockhash();
-  transaction.recentBlockhash = blockhash;
+  transaction.recentBlockhash = latest.blockhash;
   return transaction;
 }
 
@@ -146,10 +152,11 @@ export async function subscribeFlow(
       t0 += 1n;
       continue;
     }
-    const transaction = (await prepared(context, wallet.publicKey)).add(instruction);
+    const latest = await context.connection.getLatestBlockhash();
+    const transaction = prepared(wallet.publicKey, latest).add(instruction);
     const [wire] = await wallet.signTransactions([transaction]);
     if (!wire) throw new Error("wallet returned no transaction");
-    const signature = await sendSigned(context, wire);
+    const signature = await sendSigned(context, wire, latest);
     return { escrow, signature };
   }
 }
@@ -196,6 +203,7 @@ export async function collectFlow(
 ): Promise<{ released: DueChunk[]; signatures: string[] }> {
   const due = await findDueChunks(channel, context);
   const transactions: Transaction[] = [];
+  const latest = due.length > 0 ? await context.connection.getLatestBlockhash() : null;
   for (const chunk of due) {
     const account = await context.connection.getAccountInfo(chunk.escrow);
     if (!account) continue;
@@ -216,7 +224,8 @@ export async function collectFlow(
     // Recipient ATAs may not exist yet (a first-ever payout); idempotent
     // creation rides in front — the ed25519 entry must stay DIRECTLY before
     // release, that is the form's law.
-    const transaction = await prepared(context, wallet.publicKey);
+    if (!latest) break;
+    const transaction = prepared(wallet.publicKey, latest);
     const payer = new PublicKey(wallet.publicKey);
     escrow.recipients.forEach((recipient, position) => {
       if (escrow.shares[position] === 0) return;
@@ -238,7 +247,7 @@ export async function collectFlow(
   const wires = await wallet.signTransactions(transactions);
   const signatures: string[] = [];
   for (const wire of wires) {
-    signatures.push(await sendSigned(context, wire));
+    signatures.push(await sendSigned(context, wire, latest ?? undefined));
   }
   return { released: due, signatures };
 }
@@ -276,12 +285,13 @@ export async function cancelFlow(
   if ("Err" in signed) throw new Error(`request_cancel: ${signed.Err}`);
 
   const message = cancelMessage(context.domain, context.addresses.factory, escrowAddress);
-  const transaction = (await prepared(context, wallet.publicKey))
+  const latest = await context.connection.getLatestBlockhash();
+  const transaction = prepared(wallet.publicKey, latest)
     .add(ed25519VerifyIx(escrow.resolver, signed.Ok.signature, message))
     .add(cancelIx(escrowAddress, escrow, context.addresses));
   const [wire] = await wallet.signTransactions([transaction]);
   if (!wire) throw new Error("wallet returned no transaction");
-  return { signature: await sendSigned(context, wire) };
+  return { signature: await sendSigned(context, wire, latest) };
 }
 
 /** Re-exported for the page: is this escrow a live subscription (§4)? */
