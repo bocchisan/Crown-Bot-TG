@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { concat, fromHex, hex, lp, utf8 } from "../src/bytes.ts";
+import { fromHex, hex, utf8 } from "../src/bytes.ts";
 import { cancelAuthorization } from "../src/cancel-authorization.ts";
 import { buildChallenge } from "../src/challenge.ts";
 import { channelId } from "../src/channel-id.ts";
@@ -81,8 +81,3 @@ test("the cancel authorization is valid UTF-8", () => {
   assert.equal(hex(utf8(decoded)), hex(message));
 });
 
-test("lp framing is injective", () => {
-  const a = concat(lp(utf8("ab")), lp(utf8("c")));
-  const b = concat(lp(utf8("a")), lp(utf8("bc")));
-  assert.notEqual(hex(a), hex(b));
-});

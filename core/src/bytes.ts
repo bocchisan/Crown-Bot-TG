@@ -1,4 +1,4 @@
-// Little-endian writers and framing shared by every byte-critical layout.
+// Little-endian writers shared by every byte-critical layout.
 // One place, pinned by the layout tests — never re-derived at call sites.
 
 export function utf8(text: string): Uint8Array {
@@ -38,12 +38,6 @@ export function i64le(value: bigint): Uint8Array {
   const out = new Uint8Array(8);
   new DataView(out.buffer).setBigInt64(0, value, true);
   return out;
-}
-
-/// Length-prefixed part: u32 le length, then the bytes. Variable-length
-/// parts are always framed so no two field splits share an encoding.
-export function lp(part: Uint8Array): Uint8Array {
-  return concat(u32le(part.length), part);
 }
 
 export function hex(bytes: Uint8Array): string {
