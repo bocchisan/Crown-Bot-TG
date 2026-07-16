@@ -5,10 +5,10 @@
 //
 // Text, not bytes, because wallets refuse to sign anything else: Phantom runs
 // `isValidUTF8` over the payload and rejects the rest with "You cannot sign
-// solana transactions using sign message". The old binary layout made cancel
-// impossible with the largest Solana wallet — and cancel is the donor's only
-// right here. It also lets the donor read what they are cancelling: the escrow
-// address is the same base58 an explorer shows.
+// solana transactions using sign message" — a binary layout would make
+// cancel impossible with the largest Solana wallet, and cancel is the donor's
+// only right here. Text also lets the donor read what they are cancelling:
+// the escrow address is the same base58 an explorer shows.
 
 import { PublicKey } from "@solana/web3.js";
 

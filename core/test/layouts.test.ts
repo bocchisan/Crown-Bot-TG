@@ -70,7 +70,7 @@ test("the cancel authorization mirrors the canister's text", () => {
 
 // The reason it is text at all: Phantom checks isValidUTF8 over the payload
 // and refuses everything else with "You cannot sign solana transactions using
-// sign message" — with the old binary layout the donor could not cancel.
+// sign message" — a binary payload would make cancel impossible.
 test("the cancel authorization is valid UTF-8", () => {
   const message = cancelAuthorization(
     "solana-devnet",
